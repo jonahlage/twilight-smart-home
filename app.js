@@ -6,7 +6,15 @@
   // =============================================
   // AUTH STATE
   // =============================================
-  const API_BASE = '__CGI_BIN__/api.py';
+  // API_BASE: auto-detects environment
+  // - Deployed (via deploy_website): __CGI_BIN__/api.py (replaced at build time)
+  // - Local development: http://localhost:5000/api
+  const API_BASE = (() => {
+    const placeholder = '__CGI_BIN__/api.py';
+    // If the placeholder was NOT replaced, we're running locally
+    if (placeholder.includes('__CGI')) return 'http://localhost:5000/api';
+    return placeholder;
+  })();
   let authToken = null;
   let currentUser = null;
 
