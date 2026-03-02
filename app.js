@@ -524,6 +524,14 @@
   // =============================================
   // ROUTING
   // =============================================
+  // =============================================
+  // SMART DEVICE STATE
+  // =============================================
+  let smartProviders = [];
+  let smartDevices = [];
+  let deviceSourceTab = 'local'; // 'local' or 'smart'
+  let connectModalProvider = null;
+
   const viewTitles = {
     dashboard: 'Dashboard',
     rooms: 'Rooms',
@@ -578,6 +586,7 @@
       case 'scenes': renderScenesView(); break;
       case 'automations': renderAutomationsView(); break;
       case 'energy': renderEnergyView(); break;
+      case 'settings': renderSettingsView(); break;
     }
   }
 
@@ -948,8 +957,43 @@
   // RENDER: DEVICES VIEW
   // =============================================
   function renderDevicesView() {
-    renderFilterBar();
-    renderAllDevices();
+    initDeviceSourceTabs();
+    if (deviceSourceTab === 'local') {
+      renderFilterBar();
+      renderAllDevices();
+    } else {
+      renderSmartDevicesGrid();
+    }
+  }
+
+  function initDeviceSourceTabs() {
+    const tabs = document.querySelectorAll('.device-source-tab');
+    const localSection = document.getElementById('localDevicesSection');
+    const smartSection = document.getElementById('smartDevicesSection');
+
+    tabs.forEach(tab => {
+      tab.classList.toggle('active', tab.dataset.source === deviceSourceTab);
+      tab.onclick = () => {
+        deviceSourceTab = tab.dataset.source;
+        tabs.forEach(t => t.classList.toggle('active', t.dataset.source === deviceSourceTab));
+        if (deviceSourceTab === 'local') {
+          localSection.style.display = '';
+          smartSection.style.display = 'none';
+          renderFilterBar();
+          renderAllDevices();
+        } else {
+          localSection.style.display = 'none';
+          smartSection.style.display = '';
+          loadSmartDevices();
+        }
+      };
+    });
+
+    // Show correct section
+    if (localSection && smartSection) {
+      localSection.style.display = deviceSourceTab === 'local' ? '' : 'none';
+      smartSection.style.display = deviceSourceTab === 'smart' ? '' : 'none';
+    }
   }
 
   function renderFilterBar() {
@@ -1171,6 +1215,427 @@
   // =============================================
   // SEARCH
   // =============================================
+
+  // =============================================
+  // SMART DEVICE API CALLS
+  // =============================================
+
+  async function loadSmartProviders() {
+    const result = await apiRequest('/smart/providers', { method: 'GET' });
+    if (result.ok && result.data && result.data.providers) {
+      smartProviders = result.data.providers;
+    } else {
+      // Fallback: show providers from local config even if API fails
+      smartProviders = [
+        { id: 'govee', name: 'Govee', description: 'Smart LED lights, strips, and home devices', key_label: 'Govee API Key', key_hint: 'Find at https://developer.govee.com — free tier available', connected: false },
+        { id: 'lifx', name: 'LIFX', description: 'Smart WiFi light bulbs and strips', key_label: 'LIFX Personal Access Token', key_hint: 'Generate at https://cloud.lifx.com/settings', connected: false },
+      ];
+    }
+    return smartProviders;
+  }
+
+  async function connectProvider(provider, apiKey) {
+    return apiRequest('/smart/connect', {
+      method: 'POST',
+      body: JSON.stringify({ provider, api_key: apiKey }),
+    });
+  }
+
+  async function disconnectProvider(provider) {
+    return apiRequest('/smart/disconnect', {
+      method: 'POST',
+      body: JSON.stringify({ provider }),
+    });
+  }
+
+  async function loadSmartDevices() {
+    const result = await apiRequest('/smart/devices', { method: 'GET' });
+    if (result.ok) {
+      smartDevices = result.data.devices || [];
+    }
+    renderSmartDevicesGrid();
+    return smartDevices;
+  }
+
+  async function syncSmartDevices(provider) {
+    const body = provider ? { provider } : {};
+    const result = await apiRequest('/smart/sync', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    if (result.ok) {
+      smartDevices = result.data.devices || [];
+      showToast(result.data.message || 'Devices synced', 'success');
+    } else {
+      showToast(result.error || 'Sync failed', 'error');
+    }
+    renderSmartDevicesGrid();
+    return result;
+  }
+
+  async function controlSmartDevice(deviceId, action, value) {
+    const payload = { device_id: deviceId, action };
+    if (value !== undefined) payload.value = value;
+    const result = await apiRequest('/smart/control', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (result.ok && result.data.device) {
+      // Update local state
+      const idx = smartDevices.findIndex(d => d.id === deviceId);
+      if (idx >= 0) smartDevices[idx] = result.data.device;
+      renderSmartDevicesGrid();
+    } else {
+      showToast(result.error || result.data?.api_response?.error || 'Control failed', 'error');
+    }
+    return result;
+  }
+
+  // =============================================
+  // TOAST NOTIFICATIONS
+  // =============================================
+  function showToast(message, type) {
+    let toast = document.querySelector('.toast-notification');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'toast-notification';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.className = 'toast-notification ' + (type || '');
+    // Force reflow
+    void toast.offsetWidth;
+    toast.classList.add('show');
+    clearTimeout(toast._timeout);
+    toast._timeout = setTimeout(() => {
+      toast.classList.remove('show');
+    }, 3000);
+  }
+
+  // =============================================
+  // RENDER: SMART DEVICES GRID
+  // =============================================
+  function renderSmartDevicesGrid() {
+    const grid = document.getElementById('smartDevicesGrid');
+    const empty = document.getElementById('smartDevicesEmpty');
+    const countEl = document.getElementById('smartDevicesCount');
+
+    if (!grid) return;
+
+    if (smartDevices.length === 0) {
+      grid.innerHTML = '';
+      if (empty) empty.style.display = '';
+      if (countEl) countEl.textContent = '0 devices';
+      return;
+    }
+
+    if (empty) empty.style.display = 'none';
+    if (countEl) countEl.textContent = `${smartDevices.length} device${smartDevices.length !== 1 ? 's' : ''}`;
+
+    grid.innerHTML = smartDevices.map(d => renderSmartDeviceCard(d)).join('');
+    attachSmartDeviceListeners(grid);
+  }
+
+  function renderSmartDeviceCard(d) {
+    const onClass = d.is_on ? ' on' : '';
+    const onlineClass = d.is_online ? '' : ' offline';
+    const providerLabel = d.provider.charAt(0).toUpperCase() + d.provider.slice(1);
+
+    let controls = '';
+    if (d.type === 'light') {
+      controls = `
+        <div class="device-controls">
+          <div class="slider-control">
+            <label>Brightness</label>
+            <input type="range" min="0" max="100" value="${d.brightness || 0}" data-smart-device="${d.id}" data-smart-prop="brightness" aria-label="Brightness">
+            <span class="slider-value">${d.brightness || 0}%</span>
+          </div>
+        </div>`;
+    }
+
+    const statusText = !d.is_online ? 'Offline' : (d.is_on ? `On · ${d.brightness}%` : 'Off');
+
+    return `
+      <div class="device-card${onClass}${onlineClass}" data-smart-device-id="${d.id}">
+        <div class="device-card-header">
+          <div class="device-icon">${getDeviceIcon(d.type)}</div>
+          <div class="toggle-switch${d.is_on ? ' on' : ''}" data-smart-toggle="${d.id}" role="switch" aria-checked="${d.is_on}" aria-label="Toggle ${d.name}" tabindex="0"></div>
+        </div>
+        <div class="device-name">${escapeHtml(d.name)}</div>
+        <div class="device-room">${escapeHtml(d.model)}</div>
+        <div class="provider-badge ${d.provider}">${providerLabel}</div>
+        <div class="device-status">${statusText}</div>
+        ${controls}
+      </div>`;
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function attachSmartDeviceListeners(container) {
+    // Toggle switches
+    container.querySelectorAll('.toggle-switch[data-smart-toggle]').forEach(toggle => {
+      toggle.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = parseInt(toggle.dataset.smartToggle);
+        const device = smartDevices.find(d => d.id === id);
+        if (!device) return;
+        const action = device.is_on ? 'turn_off' : 'turn_on';
+        toggle.style.opacity = '0.5';
+        await controlSmartDevice(id, action);
+        toggle.style.opacity = '';
+      });
+      toggle.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggle.click();
+        }
+      });
+    });
+
+    // Brightness sliders
+    let brightnessTimeout = null;
+    container.querySelectorAll('input[type="range"][data-smart-prop="brightness"]').forEach(slider => {
+      slider.addEventListener('input', (e) => {
+        const valueEl = slider.parentElement.querySelector('.slider-value');
+        if (valueEl) valueEl.textContent = e.target.value + '%';
+      });
+      slider.addEventListener('change', (e) => {
+        const id = parseInt(slider.dataset.smartDevice);
+        const val = parseInt(e.target.value);
+        clearTimeout(brightnessTimeout);
+        brightnessTimeout = setTimeout(() => {
+          controlSmartDevice(id, 'set_brightness', val);
+        }, 300);
+      });
+    });
+
+    // Sync button
+    const syncBtn = document.getElementById('syncSmartBtn');
+    if (syncBtn) {
+      syncBtn.onclick = async () => {
+        syncBtn.classList.add('syncing');
+        await syncSmartDevices();
+        syncBtn.classList.remove('syncing');
+      };
+    }
+  }
+
+  // =============================================
+  // RENDER: SETTINGS VIEW (Smart Integrations)
+  // =============================================
+  async function renderSettingsView() {
+    try {
+      await loadSmartProviders();
+    } catch (e) {
+      // If API call fails, use fallback providers
+      smartProviders = [
+        { id: 'govee', name: 'Govee', description: 'Smart LED lights, strips, and home devices', key_label: 'Govee API Key', key_hint: 'Find at https://developer.govee.com — free tier available', connected: false },
+        { id: 'lifx', name: 'LIFX', description: 'Smart WiFi light bulbs and strips', key_label: 'LIFX Personal Access Token', key_hint: 'Generate at https://cloud.lifx.com/settings', connected: false },
+      ];
+    }
+    renderSmartProvidersGrid();
+    initSmartConnectModal();
+    initSyncAllButton();
+  }
+
+  function renderSmartProvidersGrid() {
+    const container = document.getElementById('smartProvidersGrid');
+    if (!container) return;
+
+    container.innerHTML = smartProviders.map(p => {
+      const connClass = p.connected ? ' connected' : '';
+      const statusHtml = p.connected
+        ? `<div class="smart-provider-status"><span class="status-indicator connected"></span> Connected${p.last_sync ? ' · Last synced: ' + formatRelativeTime(p.last_sync) : ''}</div>`
+        : `<div class="smart-provider-status"><span class="status-indicator"></span> Not connected</div>`;
+
+      const actionsHtml = p.connected
+        ? `<div class="smart-provider-actions">
+             <button class="btn-connect-provider reconnect" data-provider-action="reconnect" data-provider="${p.id}">Update Key</button>
+             <button class="btn-connect-provider disconnect" data-provider-action="disconnect" data-provider="${p.id}">Disconnect</button>
+           </div>`
+        : `<div class="smart-provider-actions">
+             <button class="btn-connect-provider connect" data-provider-action="connect" data-provider="${p.id}">Connect</button>
+           </div>`;
+
+      return `
+        <div class="smart-provider-card${connClass}">
+          <div class="smart-provider-header">
+            <div class="smart-provider-logo ${p.id}">${p.name.charAt(0)}</div>
+            <div class="smart-provider-info">
+              <div class="smart-provider-name">${p.name}</div>
+              <div class="smart-provider-desc">${p.description}</div>
+            </div>
+          </div>
+          ${statusHtml}
+          ${actionsHtml}
+        </div>`;
+    }).join('');
+
+    // Attach provider button listeners
+    container.querySelectorAll('[data-provider-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const provider = btn.dataset.provider;
+        const action = btn.dataset.providerAction;
+        if (action === 'connect' || action === 'reconnect') {
+          openConnectModal(provider);
+        } else if (action === 'disconnect') {
+          handleDisconnect(provider);
+        }
+      });
+    });
+  }
+
+  function formatRelativeTime(dateStr) {
+    if (!dateStr) return '';
+    try {
+      const d = new Date(dateStr + 'Z');
+      const now = new Date();
+      const diffMs = now - d;
+      const diffMin = Math.floor(diffMs / 60000);
+      if (diffMin < 1) return 'just now';
+      if (diffMin < 60) return `${diffMin}m ago`;
+      const diffHrs = Math.floor(diffMin / 60);
+      if (diffHrs < 24) return `${diffHrs}h ago`;
+      const diffDays = Math.floor(diffHrs / 24);
+      return `${diffDays}d ago`;
+    } catch (e) {
+      return dateStr;
+    }
+  }
+
+  function openConnectModal(provider) {
+    const modal = document.getElementById('smartConnectModal');
+    const titleEl = document.getElementById('modalProviderTitle');
+    const hintEl = document.getElementById('modalProviderHint');
+    const keyLabel = document.getElementById('modalKeyLabel');
+    const iconEl = document.getElementById('modalProviderIcon');
+    const input = document.getElementById('smartApiKeyInput');
+    const errorEl = document.getElementById('smartConnectError');
+
+    const prov = smartProviders.find(p => p.id === provider);
+    if (!prov) return;
+
+    connectModalProvider = provider;
+
+    titleEl.textContent = `Connect ${prov.name}`;
+    hintEl.textContent = prov.key_hint || '';
+    keyLabel.textContent = prov.key_label || 'API Key';
+    iconEl.className = `smart-connect-icon smart-provider-logo ${provider}`;
+    iconEl.textContent = prov.name.charAt(0);
+    input.value = '';
+    errorEl.textContent = '';
+    errorEl.classList.remove('visible');
+
+    modal.style.display = '';
+  }
+
+  function closeConnectModal() {
+    const modal = document.getElementById('smartConnectModal');
+    if (modal) modal.style.display = 'none';
+    connectModalProvider = null;
+  }
+
+  function initSmartConnectModal() {
+    const modal = document.getElementById('smartConnectModal');
+    const closeBtn = document.getElementById('smartConnectClose');
+    const cancelBtn = document.getElementById('smartConnectCancel');
+    const form = document.getElementById('smartConnectForm');
+    const errorEl = document.getElementById('smartConnectError');
+
+    if (closeBtn) closeBtn.onclick = closeConnectModal;
+    if (cancelBtn) cancelBtn.onclick = closeConnectModal;
+
+    // Close on backdrop click
+    if (modal) {
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeConnectModal();
+      });
+    }
+
+    // Password toggle for API key
+    const toggleBtns = modal ? modal.querySelectorAll('.password-toggle') : [];
+    toggleBtns.forEach(btn => {
+      btn.onclick = () => {
+        const input = btn.closest('.password-wrapper').querySelector('input');
+        if (!input) return;
+        const isPassword = input.type === 'password';
+        input.type = isPassword ? 'text' : 'password';
+      };
+    });
+
+    if (form) {
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        errorEl.textContent = '';
+        errorEl.classList.remove('visible');
+
+        const apiKey = document.getElementById('smartApiKeyInput').value.trim();
+        if (!apiKey || apiKey.length < 10) {
+          errorEl.textContent = 'Please enter a valid API key.';
+          errorEl.classList.add('visible');
+          return;
+        }
+
+        setButtonLoading('smartConnectBtn', true);
+
+        const result = await connectProvider(connectModalProvider, apiKey);
+
+        setButtonLoading('smartConnectBtn', false);
+
+        if (!result.ok) {
+          errorEl.textContent = result.error || 'Connection failed';
+          errorEl.classList.add('visible');
+          return;
+        }
+
+        showToast(`${result.data.message} (${result.data.devices_found} devices found)`, 'success');
+        closeConnectModal();
+
+        // Refresh providers and smart devices
+        await loadSmartProviders();
+        renderSmartProvidersGrid();
+        await loadSmartDevices();
+      };
+    }
+  }
+
+  async function handleDisconnect(provider) {
+    const prov = smartProviders.find(p => p.id === provider);
+    if (!prov) return;
+
+    // Simple confirmation
+    const confirmed = confirm(`Disconnect from ${prov.name}? This will remove all synced devices from this provider.`);
+    if (!confirmed) return;
+
+    const result = await disconnectProvider(provider);
+    if (result.ok) {
+      showToast(result.data.message || 'Disconnected', 'success');
+      smartDevices = smartDevices.filter(d => d.provider !== provider);
+      await loadSmartProviders();
+      renderSmartProvidersGrid();
+    } else {
+      showToast(result.error || 'Disconnect failed', 'error');
+    }
+  }
+
+  function initSyncAllButton() {
+    const syncBtn = document.getElementById('syncAllBtn');
+    if (syncBtn) {
+      syncBtn.onclick = async () => {
+        syncBtn.classList.add('syncing');
+        await syncSmartDevices();
+        syncBtn.classList.remove('syncing');
+        // Refresh providers to update last_sync time
+        await loadSmartProviders();
+        renderSmartProvidersGrid();
+      };
+    }
+  }
+
   const searchInput = document.getElementById('searchInput');
   if (searchInput) {
     searchInput.addEventListener('input', (e) => {
