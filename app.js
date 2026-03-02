@@ -4,6 +4,355 @@
   'use strict';
 
   // =============================================
+  // AUTH STATE
+  // =============================================
+  const API_BASE = '__CGI_BIN__/api.py';
+  let authToken = null;
+  let currentUser = null;
+
+  // Default devices to create for new users
+  const DEFAULT_DEVICES = [
+    { name: 'Main Light', room: 'Living Room', type: 'light', is_on: true, brightness: 80, color_temp: 65, favorite: true },
+    { name: 'Floor Lamp', room: 'Living Room', type: 'light', is_on: false, brightness: 50, color_temp: 50, favorite: false },
+    { name: 'Smart Speaker', room: 'Living Room', type: 'speaker', is_on: true, favorite: false },
+    { name: 'TV', room: 'Living Room', type: 'plug', is_on: false, power_draw: 0, favorite: false },
+    { name: 'Ceiling Fan', room: 'Living Room', type: 'fan', is_on: true, speed: 'Med', favorite: false },
+    { name: 'Bedroom Fan', room: 'Bedroom', type: 'fan', is_on: true, speed: 'Low', favorite: true },
+    { name: 'Bedside Lamp', room: 'Bedroom', type: 'light', is_on: false, brightness: 40, color_temp: 30, favorite: false },
+    { name: 'Smart Alarm', room: 'Bedroom', type: 'plug', is_on: true, power_draw: 2, favorite: false },
+    { name: 'Kitchen Light', room: 'Kitchen', type: 'light', is_on: true, brightness: 100, color_temp: 80, favorite: true },
+    { name: 'Coffee Maker', room: 'Kitchen', type: 'plug', is_on: false, power_draw: 0, favorite: false },
+    { name: 'Dishwasher', room: 'Kitchen', type: 'plug', is_on: true, power_draw: 120, favorite: false },
+    { name: 'Under-Cabinet LEDs', room: 'Kitchen', type: 'light', is_on: true, brightness: 60, color_temp: 70, favorite: false },
+    { name: 'Exhaust Fan', room: 'Bathroom', type: 'fan', is_on: false, speed: 'Off', favorite: false },
+    { name: 'Vanity Light', room: 'Bathroom', type: 'light', is_on: false, brightness: 70, color_temp: 60, favorite: false },
+    { name: 'Thermostat', room: 'Living Room', type: 'thermostat', is_on: true, temp: 72, mode: 'Auto', favorite: true },
+    { name: 'Smart Plug', room: 'Office', type: 'plug', is_on: true, power_draw: 85, favorite: true },
+    { name: 'Front Door Lock', room: 'Hallway', type: 'lock', is_on: true, locked: true, favorite: true },
+    { name: 'Desk Lamp', room: 'Office', type: 'light', is_on: true, brightness: 90, color_temp: 75, favorite: false },
+    { name: 'Monitor', room: 'Office', type: 'plug', is_on: true, power_draw: 45, favorite: false },
+    { name: 'Air Purifier', room: 'Office', type: 'fan', is_on: false, speed: 'Off', favorite: false },
+  ];
+
+  // =============================================
+  // AUTH API CALLS
+  // =============================================
+  async function apiRequest(path, options = {}) {
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    };
+    if (authToken) {
+      headers['Authorization'] = 'Bearer ' + authToken;
+    }
+    try {
+      const res = await fetch(API_BASE + path, {
+        ...options,
+        headers,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { ok: false, status: res.status, error: data.error || 'Request failed' };
+      }
+      return { ok: true, status: res.status, data };
+    } catch (err) {
+      return { ok: false, status: 0, error: 'Network error. Please check your connection.' };
+    }
+  }
+
+  async function registerUser(email, password, displayName) {
+    return apiRequest('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, display_name: displayName }),
+    });
+  }
+
+  async function loginUser(email, password) {
+    return apiRequest('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+  }
+
+  async function logoutUser() {
+    return apiRequest('/auth/logout', { method: 'POST' });
+  }
+
+  async function checkSession() {
+    return apiRequest('/auth/me', { method: 'GET' });
+  }
+
+  async function createDeviceAPI(device) {
+    return apiRequest('/devices', {
+      method: 'POST',
+      body: JSON.stringify(device),
+    });
+  }
+
+  async function seedDefaultDevices() {
+    // Create all default devices in parallel
+    const promises = DEFAULT_DEVICES.map(d => createDeviceAPI(d));
+    try {
+      await Promise.all(promises);
+    } catch (_) {
+      // Silently fail — devices can be added later
+    }
+  }
+
+  // =============================================
+  // AUTH UI LOGIC
+  // =============================================
+  function showAuthScreen() {
+    const authScreen = document.getElementById('authScreen');
+    const dashboard = document.getElementById('dashboardContainer');
+    if (authScreen) {
+      authScreen.classList.remove('hidden');
+    }
+    if (dashboard) {
+      dashboard.style.display = 'none';
+    }
+  }
+
+  function hideAuthScreen() {
+    const authScreen = document.getElementById('authScreen');
+    const dashboard = document.getElementById('dashboardContainer');
+    if (authScreen) {
+      authScreen.classList.add('hidden');
+    }
+    if (dashboard) {
+      dashboard.style.display = '';
+    }
+  }
+
+  function updateUserDisplay() {
+    if (!currentUser) return;
+    const nameEl = document.getElementById('sidebarUserName');
+    const emailEl = document.getElementById('sidebarUserEmail');
+    const avatarEl = document.getElementById('sidebarAvatar');
+    const welcomeEl = document.querySelector('.welcome-text h1 span');
+
+    const displayName = currentUser.display_name || 'User';
+    if (nameEl) nameEl.textContent = displayName;
+    if (emailEl) emailEl.textContent = currentUser.email || '';
+    if (avatarEl) avatarEl.textContent = displayName.charAt(0).toUpperCase();
+    if (welcomeEl) welcomeEl.textContent = displayName;
+  }
+
+  function showAuthError(containerId, message) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    el.textContent = message;
+    el.classList.add('visible');
+  }
+
+  function hideAuthError(containerId) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    el.textContent = '';
+    el.classList.remove('visible');
+  }
+
+  function setButtonLoading(btnId, loading) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    if (loading) {
+      btn.classList.add('loading');
+      btn.disabled = true;
+    } else {
+      btn.classList.remove('loading');
+      btn.disabled = false;
+    }
+  }
+
+  // Password strength checker
+  function getPasswordStrength(password) {
+    if (!password || password.length < 8) return 'weak';
+    const hasUpper = /[A-Z]/.test(password);
+    const hasLower = /[a-z]/.test(password);
+    const hasDigit = /[0-9]/.test(password);
+    const hasSymbol = /[^A-Za-z0-9]/.test(password);
+    const variety = [hasUpper, hasLower, hasDigit, hasSymbol].filter(Boolean).length;
+
+    // Common weak passwords
+    const common = ['password', '12345678', 'qwerty12', 'abcdefgh', 'letmein1', 'welcome1'];
+    if (common.some(c => password.toLowerCase().includes(c))) return 'weak';
+
+    if (password.length >= 12 && variety >= 3) return 'strong';
+    if (password.length >= 8 && variety >= 2) return 'medium';
+    return 'weak';
+  }
+
+  function updatePasswordStrength(password) {
+    const container = document.getElementById('passwordStrength');
+    if (!container) return;
+    const fill = container.querySelector('.strength-fill');
+    const label = container.querySelector('.strength-label');
+    if (!fill || !label) return;
+
+    if (!password) {
+      container.classList.remove('visible');
+      fill.removeAttribute('data-strength');
+      label.removeAttribute('data-strength');
+      label.textContent = '';
+      return;
+    }
+
+    container.classList.add('visible');
+    const strength = getPasswordStrength(password);
+    fill.setAttribute('data-strength', strength);
+    label.setAttribute('data-strength', strength);
+    label.textContent = strength.charAt(0).toUpperCase() + strength.slice(1);
+  }
+
+  function initAuthUI() {
+    // Tab switching
+    document.querySelectorAll('.auth-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const targetTab = tab.dataset.tab;
+        document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+
+        const loginForm = document.getElementById('loginForm');
+        const registerForm = document.getElementById('registerForm');
+        if (targetTab === 'login') {
+          loginForm.style.display = '';
+          registerForm.style.display = 'none';
+        } else {
+          loginForm.style.display = 'none';
+          registerForm.style.display = '';
+        }
+        hideAuthError('loginError');
+        hideAuthError('registerError');
+      });
+    });
+
+    // Password visibility toggles
+    document.querySelectorAll('.password-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const input = btn.closest('.password-wrapper').querySelector('input');
+        if (!input) return;
+        const isPassword = input.type === 'password';
+        input.type = isPassword ? 'text' : 'password';
+        btn.classList.toggle('active', isPassword);
+        btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
+        // Switch icon
+        if (isPassword) {
+          btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+        } else {
+          btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+        }
+      });
+    });
+
+    // Password strength indicator
+    const regPasswordInput = document.getElementById('regPassword');
+    if (regPasswordInput) {
+      regPasswordInput.addEventListener('input', () => {
+        updatePasswordStrength(regPasswordInput.value);
+      });
+    }
+
+    // Login form submit
+    const loginForm = document.getElementById('loginForm');
+    if (loginForm) {
+      loginForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hideAuthError('loginError');
+        setButtonLoading('loginBtn', true);
+
+        const email = document.getElementById('loginEmail').value.trim();
+        const password = document.getElementById('loginPassword').value;
+
+        const result = await loginUser(email, password);
+        setButtonLoading('loginBtn', false);
+
+        if (!result.ok) {
+          showAuthError('loginError', result.error);
+          return;
+        }
+
+        authToken = result.data.token;
+        currentUser = result.data.user;
+        onAuthSuccess();
+      });
+    }
+
+    // Register form submit
+    const registerForm = document.getElementById('registerForm');
+    if (registerForm) {
+      registerForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        hideAuthError('registerError');
+
+        const displayName = document.getElementById('regName').value.trim();
+        const email = document.getElementById('regEmail').value.trim();
+        const password = document.getElementById('regPassword').value;
+        const passwordConfirm = document.getElementById('regPasswordConfirm').value;
+
+        // Client-side validation
+        if (password.length < 8) {
+          showAuthError('registerError', 'Password must be at least 8 characters.');
+          return;
+        }
+        if (password !== passwordConfirm) {
+          showAuthError('registerError', 'Passwords do not match.');
+          return;
+        }
+
+        setButtonLoading('registerBtn', true);
+
+        const result = await registerUser(email, password, displayName);
+        setButtonLoading('registerBtn', false);
+
+        if (!result.ok) {
+          showAuthError('registerError', result.error);
+          return;
+        }
+
+        authToken = result.data.token;
+        currentUser = result.data.user;
+
+        // Seed default devices for new user (non-blocking)
+        seedDefaultDevices();
+
+        onAuthSuccess();
+      });
+    }
+
+    // Sign out button
+    const signOutBtn = document.getElementById('signOutBtn');
+    if (signOutBtn) {
+      signOutBtn.addEventListener('click', async () => {
+        await logoutUser();
+        authToken = null;
+        currentUser = null;
+        showAuthScreen();
+        // Reset forms
+        const loginFormEl = document.getElementById('loginForm');
+        const registerFormEl = document.getElementById('registerForm');
+        if (loginFormEl) loginFormEl.reset();
+        if (registerFormEl) registerFormEl.reset();
+        hideAuthError('loginError');
+        hideAuthError('registerError');
+        updatePasswordStrength('');
+        // Reset tab to login
+        document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+        const loginTab = document.querySelector('.auth-tab[data-tab="login"]');
+        if (loginTab) loginTab.classList.add('active');
+        if (loginFormEl) loginFormEl.style.display = '';
+        if (registerFormEl) registerFormEl.style.display = 'none';
+      });
+    }
+  }
+
+  function onAuthSuccess() {
+    updateUserDisplay();
+    hideAuthScreen();
+    // Kick off dashboard
+    initDashboard();
+  }
+
+  // =============================================
   // STATE
   // =============================================
   const state = {
@@ -855,16 +1204,36 @@
   }
 
   // =============================================
-  // INIT
+  // DASHBOARD INIT (called after auth success)
   // =============================================
-  function init() {
+  function initDashboard() {
     initTheme();
-
     // Show skeleton briefly, then render
     showSkeleton();
     setTimeout(() => {
       handleHash();
     }, 200);
+  }
+
+  // =============================================
+  // INIT
+  // =============================================
+  async function init() {
+    initTheme();
+    initAuthUI();
+
+    // Check for existing session
+    const result = await checkSession();
+    if (result.ok && result.data && result.data.user) {
+      authToken = authToken; // already set if we had one from login
+      currentUser = result.data.user;
+      onAuthSuccess();
+    } else {
+      // No valid session — show auth screen
+      authToken = null;
+      currentUser = null;
+      showAuthScreen();
+    }
   }
 
   // Wait for DOM
